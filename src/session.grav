@@ -1,0 +1,210 @@
+// session.grav — Session: what a user's browser keeps across requests (by a
+// cookie holding its id), with flash data that lives exactly one more request.
+//
+//   let s = req.session as Session
+//   s.put("cart", items)
+//   s.get("cart")
+//   s.flash("status", "Saved!")        // there on the next request, then gone
+//   s.regenerate()                     // a new id after signing in (no session fixation)
+//   s.token()                          // the CSRF token
+//
+// Values are plain (null, bool, numbers, strings, Array<any>,
+// HashMap<string, any>): the session is stored as JSON.
+import "std"
+import "apogee-http"
+
+namespace apogee {
+
+    // Where sessions are kept: the payload (JSON text) by id.
+    interface SessionStore {
+        // The payload, or null when there is none (or it expired).
+        fn read(id: string) -> string?
+        fn write(id: string, payload: string, lifetimeSeconds: long)
+        fn destroy(id: string)
+        // Drops sessions older than `lifetimeSeconds` (stores that expire them themselves do nothing).
+        fn gc(lifetimeSeconds: long) {}
+    }
+
+    class Session implements FlashStore, OldInputStore {
+        public id: string
+        public name: string
+        private data: HashMap<string, any>
+        private store: SessionStore
+        private started: bool
+        private dirty: bool
+        // An id that must be destroyed in the store when this session is saved (regenerate/invalidate).
+        private oldId: string
+
+        constructor(store: SessionStore, id: string = "", name: string = "apogee_session") {
+            self.store = store;
+            self.name = name;
+            self.id = Session.validId(id) ? id : Session.newId();
+            self.data = new HashMap<string, any>();
+            self.started = false;
+            self.dirty = false;
+            self.oldId = "";
+        }
+        static fn newId() -> string { return Hash.randomToken(20); }
+        // 40 hex digits: what newId() makes (anything else a client sends is ignored).
+        static fn validId(id: string) -> bool {
+            if (id.length != 40) { return false; }
+            for (i in 0..40) { let c = id[i] as int; if (!((c >= 48 && c <= 57) || (c >= 97 && c <= 102))) { return false; } }
+            return true;
+        }
+
+        // Loads the stored payload (once).
+        fn start() -> Session {
+            if (self.started) { return self; }
+            self.started = true;
+            let raw = self.store.read(self.id);
+            if (raw != null) {
+                try {
+                    let v = Plain.parse(raw);
+                    if (v is HashMap<string, any>) { self.data = v as HashMap<string, any>; }
+                } catch (e: Exception) { self.data = new HashMap<string, any>(); }
+            }
+            if (!self.data.containsKey("_token")) { self.data.put("_token", Hash.randomToken(20)); self.dirty = true; }
+            return self;
+        }
+        fn isStarted() -> bool { return self.started; }
+
+        // ── values ─────────────────────────────────────────────────────────────
+        fn all() -> HashMap<string, any> { self.start(); return self.data; }
+        fn has(key: string) -> bool { self.start(); return Plain.dig(self.data, key) != null; }
+        fn exists(key: string) -> bool { self.start(); return self.data.containsKey(key) || Plain.dig(self.data, key) != null; }
+        fn missing(key: string) -> bool { return !self.exists(key); }
+        fn get(key: string, fallback: any = null) -> any {
+            self.start();
+            let v = self.data.containsKey(key) ? self.data[key] : Plain.dig(self.data, key);
+            return v == null ? fallback : v;
+        }
+        fn string(key: string, fallback: string = "") -> string { let v = self.get(key); return v == null ? fallback : (v is string ? v as string : str(v)); }
+        fn put(key: string, value: any) { self.start(); self.data.put(key, value); self.dirty = true; }
+        fn putMany(values: HashMap<string, any>) { values.forEach(fn(k: string, v: any) { self.put(k, v); }); }
+        // Appends to the list at `key`.
+        fn push(key: string, value: any) {
+            let cur = self.get(key);
+            let list = cur is Array<any> ? cur as Array<any> : new Array<any>();
+            list.push(value);
+            self.put(key, list);
+        }
+        fn increment(key: string, by: long = 1) -> long {
+            let v = self.get(key);
+            let n = (v is long ? v as long : 0) + by;
+            self.put(key, n);
+            return n;
+        }
+        fn decrement(key: string, by: long = 1) -> long { return self.increment(key, 0 - by); }
+        // The value, removing it.
+        fn pull(key: string, fallback: any = null) -> any { let v = self.get(key, fallback); self.forget(key); return v; }
+        fn forget(key: string) { self.start(); if (self.data.containsKey(key)) { self.data.remove(key); self.dirty = true; } }
+        fn forgetMany(keys: Array<string>) { for (k in keys) { self.forget(k); } }
+        // Everything but the CSRF token.
+        fn flush() { self.start(); let t = self.token(); self.data = new HashMap<string, any>(); self.data.put("_token", t); self.dirty = true; }
+        // The value at `key`, or `make()`'s, stored.
+        fn remember(key: string, make: fn() -> any) -> any {
+            if (self.exists(key)) { return self.get(key); }
+            let v = make();
+            self.put(key, v);
+            return v;
+        }
+
+        // ── flash ──────────────────────────────────────────────────────────────
+        // Kept for the next request only.
+        fn flash(key: string, value: any) {
+            self.put(key, value);
+            self.listAdd("_flash.new", key);
+            self.listRemove("_flash.old", key);
+        }
+        fn flashed(key: string) -> any { return self.get(key); }
+        // For this request only (not the next).
+        fn now(key: string, value: any) { self.put(key, value); self.listAdd("_flash.old", key); }
+        // Keeps all of this request's flash data for one more request.
+        fn reflash() { for (k in self.list("_flash.old")) { self.listAdd("_flash.new", k); } self.put("_flash.old", new Array<any>()); }
+        fn keep(keys: Array<string>) { for (k in keys) { self.listAdd("_flash.new", k); self.listRemove("_flash.old", k); } }
+        // (done once per request, before saving: last request's flash goes, this one's ages)
+        fn ageFlashData() {
+            self.start();
+            for (k in self.list("_flash.old")) { self.forget(k); }
+            let fresh = self.list("_flash.new");
+            if (fresh.size() == 0 && self.list("_flash.old").size() == 0) { return; }
+            let old = new Array<any>();
+            for (k in fresh) { old.push(k); }
+            self.put("_flash.old", old);
+            self.put("_flash.new", new Array<any>());
+        }
+        private fn list(key: string) -> Array<string> {
+            let out = new Array<string>();
+            let v = self.data.getOr(key, null);
+            if (v is Array<any>) { for (x in v as Array<any>) { out.push(str(x)); } }
+            return out;
+        }
+        private fn listAdd(key: string, item: string) {
+            let l = self.list(key);
+            if (l.contains(item)) { return; }
+            let out = new Array<any>();
+            for (x in l) { out.push(x); }
+            out.push(item);
+            self.data.put(key, out);
+            self.dirty = true;
+        }
+        private fn listRemove(key: string, item: string) {
+            let l = self.list(key);
+            if (!l.contains(item)) { return; }
+            let out = new Array<any>();
+            for (x in l) { if (x != item) { out.push(x); } }
+            self.data.put(key, out);
+            self.dirty = true;
+        }
+
+        // ── old input and errors (what a failed form leaves) ───────────────────
+        fn flashInput(values: HashMap<string, any>) { self.flash("_old_input", values); }
+        fn oldInput(key: string) -> any {
+            let old = self.get("_old_input");
+            if (!(old is HashMap<string, any>)) { return null; }
+            if (key == "") { return old; }
+            return Plain.dig(old, key);
+        }
+        fn hasOldInput(key: string = "") -> bool { return self.oldInput(key) != null; }
+        // The errors flashed under `bag` (field -> messages), or an empty map.
+        fn errors(bag: string = "default") -> HashMap<string, any> {
+            let all = self.get("errors");
+            if (all is HashMap<string, any>) {
+                let b = (all as HashMap<string, any>).getOr(bag, null);
+                if (b is HashMap<string, any>) { return b as HashMap<string, any>; }
+            }
+            return new HashMap<string, any>();
+        }
+        // The first error for `field` ("" when none).
+        fn error(field: string, bag: string = "default") -> string {
+            let list = self.errors(bag).getOr(field, null);
+            return list is Array<any> && (list as Array<any>).size() > 0 ? str((list as Array<any>)[0]) : "";
+        }
+
+        // ── the CSRF token, the previous URL ───────────────────────────────────
+        fn token() -> string { self.start(); return str(self.data.getOr("_token", "")); }
+        fn regenerateToken() { self.put("_token", Hash.randomToken(20)); }
+        fn previousUrl() -> string { return self.string("_previous.url"); }
+        fn setPreviousUrl(url: string) { self.put("_previous.url", url); }
+
+        // ── identity ───────────────────────────────────────────────────────────
+        // A new id for the same data (do it on sign-in: an id an attacker
+        // planted before is worth nothing after); `destroy` drops the old one.
+        fn regenerate(destroy: bool = true) {
+            self.start();
+            if (destroy && self.oldId == "") { self.oldId = self.id; }
+            self.id = Session.newId();
+            self.dirty = true;
+        }
+        // Empties it and gives it a new id (on sign-out).
+        fn invalidate() { self.start(); self.data = new HashMap<string, any>(); self.regenerate(true); self.regenerateToken(); }
+        fn isDirty() -> bool { return self.dirty; }
+        // Writes it to the store (and drops a replaced id).
+        fn save(lifetimeSeconds: long) {
+            if (!self.started) { return; }
+            if (self.oldId != "") { self.store.destroy(self.oldId); self.oldId = ""; }
+            self.store.write(self.id, JsonWriter.encode(self.data), lifetimeSeconds);
+            self.dirty = false;
+        }
+    }
+}
