@@ -1,0 +1,161 @@
+// apogee-session's tests: values, flash aging, regeneration, every store, the
+// middleware across requests (cookie, previous URL, saving), CSRF, and a
+// failed form coming back with its errors and old input.
+import "std"
+import "std/net"
+import "../src/all.grav"
+import "../../apogee-routing/src/all.grav"
+import "../../apogee-validation/src/all.grav"
+use apogee.*
+
+test "values, nesting, counters, pull, remember, flush" {
+    let s = new Session(new MemorySessionStore()).start()
+    let roles = new Array<any>(); roles.push("admin")
+    let user = new HashMap<string, any>(); user.put("name", "Ada"); user.put("roles", roles)
+    s.put("user", user)
+    assertEq(s.get("user.name") as string, "Ada")
+    assertEq("${s.increment("visits")} ${s.increment("visits", 4)} ${s.decrement("visits")}", "1 5 4")
+    s.push("cart", "apple")
+    s.push("cart", "pear")
+    assertEq((s.get("cart") as Array<any>).size(), 2)
+    assertEq(s.pull("cart") is Array<any>, true)
+    assertEq(s.has("cart"), false)
+    assertEq(s.remember("once", fn() -> any { return "made" }) as string, "made")
+    let token = s.token()
+    assertEq(token.length, 40)
+    s.flush()
+    assertEq("${s.has("user")} ${s.token() == token}", "false true")
+}
+
+test "flash lives exactly one more request; now(), reflash() and keep()" {
+    let store = new MemorySessionStore()
+    let s = new Session(store).start()
+    s.flash("status", "Saved!")
+    s.now("toast", "only now")
+    s.ageFlashData()                                   // end of request 1
+    s.save(60)
+    let s2 = new Session(store, s.id).start()          // request 2
+    assertEq("${s2.get("status")} ${s2.has("toast")}", "Saved! false")
+    s2.ageFlashData()
+    s2.save(60)
+    let s3 = new Session(store, s.id).start()          // request 3
+    assertEq(s3.has("status"), false)
+    s3.flash("a", 1)
+    s3.flash("b", 2)
+    s3.ageFlashData(); s3.save(60)
+    let s4 = new Session(store, s.id).start()
+    s4.keep(["a"])
+    s4.ageFlashData(); s4.save(60)
+    let s5 = new Session(store, s.id).start()
+    assertEq("${s5.has("a")} ${s5.has("b")}", "true false")
+}
+
+test "regenerate and invalidate: new ids, old ones gone" {
+    let store = new MemorySessionStore()
+    let s = new Session(store).start()
+    s.put("k", "v")
+    s.save(60)
+    let first = s.id
+    s.regenerate()
+    s.save(60)
+    assertEq("${s.id != first} ${store.read(first) == null} ${new Session(store, s.id).start().get("k")}", "true true v")
+    let t = s.token()
+    s.invalidate()
+    s.save(60)
+    assertEq("${s.has("k")} ${s.token() != t}", "false true")
+    assertEq(Session.validId("../../etc/passwd"), false)
+    assertEq(new Session(store, "forged").id != "forged", true)        // an id it did not make is replaced
+}
+
+test "file and Redis stores round-trip and expire" {
+    let dir = "${Dir.temp()}/apogee-session-${Process.pid()}"
+    let fs = new FileSessionStore(dir)
+    let s = new Session(fs).start()
+    s.put("x", 42)
+    s.save(60)
+    assertEq(new Session(fs, s.id).start().get("x") as long, 42 as long)
+    fs.write(Session.newId(), "{}", -1)                                 // already expired
+    fs.gc(60)
+    assertEq(Dir.list(dir).size(), 1)
+    fs.destroy(s.id)
+    assertEq(fs.read(s.id) == null, true)
+    Dir.removeAll(dir)
+    let url = env("REDIS_URL")
+    let conn = RedisConnection.open(url == "" ? "redis://127.0.0.1:6379/9" : url)
+    let rs = new RedisSessionStore(conn, "test-session:")
+    let r = new Session(rs).start()
+    r.put("y", "z")
+    r.save(60)
+    assertEq("${new Session(rs, r.id).start().get("y")} ${conn.ttl("test-session:" + r.id) > 0}", "z true")
+    rs.destroy(r.id)
+    conn.close()
+}
+
+fn web() -> HttpKernel {
+    let sessions = new SessionManager(new MemorySessionStore(), "test-app-key")
+    let r = new Router(new Container())
+    r.aliasInstance("session", new StartSession(sessions))
+    r.aliasInstance("csrf", new VerifyCsrfToken(["hooks/*"]))
+    r.middlewareGroup("web", ["session", "csrf"])
+    r.middleware(["web"]).group(fn(r: Router) {
+        r.get("/count", fn(req: Request) -> Response { return Response.text("${(req.session as Session).increment("n")}") })
+        r.get("/form", fn(req: Request) -> Response { return Response.text((req.session as Session).token()) })
+        r.post("/save", fn(req: Request) -> Response { return Response.text("saved") })
+        r.post("/hooks/stripe", fn(req: Request) -> Response { return Response.text("hooked") })
+        r.post("/signup", fn(req: Request) -> Response {
+            req.validate({"email": "required|email", "name": "required"})
+            return Response.text("ok")
+        })
+        r.get("/signup", fn(req: Request) -> Response {
+            let s = req.session as Session
+            return Response.text("${s.error("email")}|${req.old("email", "")}|${req.old("password", "-")}")
+        })
+    })
+    return new HttpKernel(r)
+}
+// Sends a request with the cookies a browser would have kept.
+fn browse(k: HttpKernel, jar: HashMap<string, string>, method: string, path: string, body: string = "", headers: HashMap<string, string> = new HashMap<string, string>()) -> Response {
+    let req = Request.make(method, path, body, body == "" ? "" : "application/x-www-form-urlencoded")
+    let parts = new Array<string>()
+    jar.forEach(fn(n: string, v: string) { parts.push(n + "=" + v) })
+    if (parts.size() > 0) { req.http.headers.set("Cookie", Str.join(parts, "; ")) }
+    headers.forEach(fn(n: string, v: string) { req.http.headers.set(n, v) })
+    let res = k.handleRequest(req)
+    for (c in res.http.cookies()) { jar.put(c.name, c.value) }
+    return res
+}
+
+test "the middleware: one session across requests, by its signed cookie" {
+    let k = web()
+    let jar = new HashMap<string, string>()
+    assertEq(browse(k, jar, "GET", "/count").body(), "1")
+    assertEq(browse(k, jar, "GET", "/count").body(), "2")
+    let other = new HashMap<string, string>()
+    assertEq(browse(k, other, "GET", "/count").body(), "1")             // another browser, another session
+    let tampered = new HashMap<string, string>()
+    tampered.put("apogee_session", Str.replace(jar["apogee_session"], "a", "b"))
+    assertEq(browse(k, tampered, "GET", "/count").body(), "1")          // a changed cookie is a new session
+}
+
+test "CSRF: tokens by field, header or XSRF cookie; 419 without; exceptions" {
+    let k = web()
+    let jar = new HashMap<string, string>()
+    let token = browse(k, jar, "GET", "/form").body()
+    assertEq(browse(k, jar, "POST", "/save", "x=1").statusCode(), 419)
+    assertEq(browse(k, jar, "POST", "/save", "_token=" + token).body(), "saved")
+    assertEq(browse(k, jar, "POST", "/save", "x=1", {"X-CSRF-TOKEN": token}).body(), "saved")
+    assertEq(browse(k, jar, "POST", "/save", "x=1", {"X-XSRF-TOKEN": jar["XSRF-TOKEN"]}).body(), "saved")
+    assertEq(browse(k, jar, "POST", "/save", "_token=wrong").statusCode(), 419)
+    assertEq(browse(k, jar, "POST", "/hooks/stripe", "x=1").body(), "hooked")
+}
+
+test "a failed form redirects back, with its errors and old input (not the password)" {
+    let k = web()
+    let jar = new HashMap<string, string>()
+    let token = browse(k, jar, "GET", "/signup").body()
+    let back = browse(k, jar, "POST", "/signup", "_token=" + browse(k, jar, "GET", "/form").body() + "&email=nope&password=secret", {"Referer": "/signup"})
+    assertEq("${back.statusCode()} ${back.getHeader("Location")}", "302 /signup")
+    assertEq(browse(k, jar, "GET", "/signup").body(), "The email field must be a valid email address.|nope|-")
+    assertEq(browse(k, jar, "GET", "/signup").body(), "||-")              // flash is gone the request after
+    assertEq(token != "", true)
+}
