@@ -1,0 +1,109 @@
+// middleware.grav — StartSession (a session for every request, its cookie,
+// its flash data aged, saved once the response is made) and VerifyCsrfToken
+// (a state-changing request must carry the session's token).
+//
+//   let sessions = new SessionManager(new FileSessionStore("storage/sessions"), Config.getString("app.key"))
+//   router.aliasInstance("session", new StartSession(sessions))
+//   router.aliasInstance("csrf", new VerifyCsrfToken(["webhooks/*"]))
+//   router.middlewareGroup("web", ["session", "csrf"])
+import "std"
+import "std/net"
+import "apogee-http"
+import "session.grav"
+
+namespace apogee {
+
+    // The session settings, and making a request's session.
+    class SessionManager {
+        public store: SessionStore
+        public cookieName: string = "apogee_session"
+        // How long a session lives without use.
+        public lifetimeMinutes: int = 120
+        // End the session when the browser closes (the cookie has no lifetime).
+        public expireOnClose: bool = false
+        public path: string = "/"
+        public domain: string = ""
+        // Secure cookies: true, false, or null for "when the request is HTTPS".
+        public secure: bool? = null
+        public sameSite: string = "Lax"
+        // Collect expired sessions on about one request in this many (0: never).
+        public gcLottery: int = 100
+        private jar: CookieJar
+        private hits: AtomicInt
+
+        constructor(store: SessionStore, appKey: string) {
+            self.store = store;
+            self.jar = new CookieJar(appKey);
+            self.hits = new AtomicInt(0);
+        }
+        fn lifetimeSeconds() -> long { return (self.lifetimeMinutes as long) * 60; }
+        // The session the request's cookie names (or a new one), started.
+        fn sessionFor(req: Request) -> Session {
+            let id = self.jar.read(req, self.cookieName);
+            return new Session(self.store, id, self.cookieName).start();
+        }
+        fn cookieFor(s: Session, req: Request) -> Cookie {
+            self.jar.path = self.path;
+            self.jar.domain = self.domain;
+            self.jar.sameSite = self.sameSite;
+            self.jar.secure = self.secure == null ? req.isSecure() : self.secure!;
+            return self.jar.make(self.cookieName, s.id, self.expireOnClose ? 0 : self.lifetimeMinutes);
+        }
+        fn maybeCollect() {
+            if (self.gcLottery <= 0) { return; }
+            if (self.hits.increment() % (self.gcLottery as long) == 0) { self.store.gc(self.lifetimeSeconds()); }
+        }
+    }
+
+    class StartSession implements Middleware {
+        public manager: SessionManager
+        constructor(manager: SessionManager) { self.manager = manager; }
+        fn handle(req: Request, next: fn(Request) -> Response) -> Response {
+            let s = self.manager.sessionFor(req);
+            req.session = s;
+            let res: Response = null;
+            // An error that renders itself (a failed form flashing its errors) is
+            // rendered here, so what it put in the session is saved with it.
+            try { res = next(req); }
+            catch (e: Exception) {
+                if (!(e is Renderable)) { s.ageFlashData(); s.save(self.manager.lifetimeSeconds()); throw e; }
+                res = (e as Renderable).render(req);
+            }
+            // A GET that rendered a page is where "back" goes next time.
+            if (req.method() == "GET" && !req.ajax() && !req.prefetch() && res.statusCode() < 300) { s.setPreviousUrl(req.fullUrl()); }
+            s.ageFlashData();
+            s.save(self.manager.lifetimeSeconds());
+            self.manager.maybeCollect();
+            return res.withCookie(self.manager.cookieFor(s, req));
+        }
+    }
+
+    // POST, PUT, PATCH and DELETE must carry the session's CSRF token: a
+    // `_token` field, an X-CSRF-TOKEN header, or the X-XSRF-TOKEN header that
+    // JavaScript clients copy from the XSRF-TOKEN cookie set on every response.
+    // A mismatch is a 419 (the page expired). Paths in `except` (globs) are
+    // left alone (webhooks signed in other ways).
+    class VerifyCsrfToken implements Middleware {
+        public except: Array<string>
+        // Set the XSRF-TOKEN cookie for JavaScript clients.
+        public addCookie: bool = true
+        constructor(except: Array<string> = new Array<string>()) { self.except = except; }
+        fn handle(req: Request, next: fn(Request) -> Response) -> Response {
+            if (!(req.session is Session)) { throw new StateError("VerifyCsrfToken needs a session first: put StartSession before it"); }
+            let s = req.session as Session;
+            let m = req.method();
+            let reading = m == "GET" || m == "HEAD" || m == "OPTIONS";
+            if (!reading && !req.pathIs(self.except) && !self.tokensMatch(req, s)) { throw new HttpException(419, "Page Expired"); }
+            let res = next(req);
+            if (self.addCookie) { res.withCookie(new Cookie("XSRF-TOKEN", s.token()).withPath("/").withSameSite("Lax").secure(req.isSecure())); }
+            return res;
+        }
+        fn tokensMatch(req: Request, s: Session) -> bool {
+            let sent = req.text("_token");
+            if (sent == "") { sent = req.header("X-CSRF-TOKEN"); }
+            if (sent == "") { sent = Url.decode(req.header("X-XSRF-TOKEN")); }
+            let mine = s.token();
+            return sent != "" && mine != "" && Hash.equals(sent, mine);
+        }
+    }
+}
