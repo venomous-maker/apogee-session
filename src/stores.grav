@@ -1,0 +1,104 @@
+// stores.grav — where sessions are kept: in memory (one process: tests,
+// development), in files (one per session), or in Redis.
+import "std"
+import "grav-redis"
+import "session.grav"
+
+namespace apogee {
+
+    class MemoryEntry {
+        public payload: string
+        public expires: long
+        constructor(payload: string, expires: long) { self.payload = payload; self.expires = expires; }
+    }
+
+    // In this process's memory, thread-safe; gone when it exits.
+    class MemorySessionStore implements SessionStore {
+        private entries: HashMap<string, MemoryEntry>
+        private lock: Mutex
+        private writes: int
+        constructor() { self.entries = new HashMap<string, MemoryEntry>(); self.lock = new Mutex(); self.writes = 0; }
+        fn read(id: string) -> string? {
+            self.lock.lock();
+            let e = self.entries.getOr(id, null);
+            let out: string? = null;
+            if (e != null && e.expires > Time.now()) { out = e.payload; }
+            self.lock.unlock();
+            return out;
+        }
+        fn write(id: string, payload: string, lifetimeSeconds: long) {
+            self.lock.lock();
+            self.entries.put(id, new MemoryEntry(payload, Time.now() + lifetimeSeconds));
+            self.writes += 1;
+            if (self.writes % 1000 == 0) { self.sweep(); }
+            self.lock.unlock();
+        }
+        fn destroy(id: string) { self.lock.lock(); self.entries.remove(id); self.lock.unlock(); }
+        fn gc(lifetimeSeconds: long) { self.lock.lock(); self.sweep(); self.lock.unlock(); }
+        fn count() -> int { self.lock.lock(); let n = self.entries.size(); self.lock.unlock(); return n; }
+        private fn sweep() {
+            let now = Time.now();
+            let dead = new Array<string>();
+            self.entries.forEach(fn(k: string, e: MemoryEntry) { if (e.expires <= now) { dead.push(k); } });
+            for (k in dead) { self.entries.remove(k); }
+        }
+    }
+
+    // One file per session under `dir` (written to a temp file, then renamed).
+    class FileSessionStore implements SessionStore {
+        public dir: string
+        private static counter: AtomicInt = new AtomicInt(0)
+        constructor(dir: string) {
+            self.dir = dir;
+            if (!Dir.exists(dir) && !Dir.create(dir)) { throw new IOError("cannot create the session directory '${dir}'"); }
+        }
+        private fn path(id: string) -> string { return self.dir + "/sess_" + id; }
+        fn read(id: string) -> string? {
+            if (!Session.validId(id)) { return null; }
+            let raw = new File(self.path(id)).readOr("");
+            let nl = Str.indexOf(raw, "\n");
+            if (nl < 0) { return null; }
+            if (Integer.parseOr(raw[..nl], 0) <= Time.now()) { new File(self.path(id)).delete(); return null; }
+            return raw[nl + 1..];
+        }
+        fn write(id: string, payload: string, lifetimeSeconds: long) {
+            let target = self.path(id);
+            let tmp = new File(target + ".tmp${Process.pid()}_${FileSessionStore.counter.increment()}");
+            if (!tmp.write("${Time.now() + lifetimeSeconds}\n" + payload) || !tmp.moveTo(target)) {
+                tmp.delete();
+                throw new IOError("cannot write a session to '${self.dir}'");
+            }
+        }
+        fn destroy(id: string) { if (Session.validId(id)) { new File(self.path(id)).delete(); } }
+        fn gc(lifetimeSeconds: long) {
+            let now = Time.now();
+            for (name in Dir.list(self.dir)) {
+                if (!Str.startsWith(name, "sess_") || Str.contains(name, ".tmp")) { continue; }
+                let raw = new File(self.dir + "/" + name).readOr("");
+                let nl = Str.indexOf(raw, "\n");
+                if (nl < 0 || Integer.parseOr(raw[..nl], 0) <= now) { new File(self.dir + "/" + name).delete(); }
+            }
+        }
+    }
+
+    // In Redis, under `prefix + id`, expiring by Redis's own TTL.
+    class RedisSessionStore implements SessionStore {
+        public conn: RedisConnection
+        public prefix: string
+        private lock: Mutex
+        constructor(conn: RedisConnection, prefix: string = "session:") { self.conn = conn; self.prefix = prefix; self.lock = new Mutex(); }
+        // (one connection: requests on several threads take turns on it)
+        fn read(id: string) -> string? {
+            self.lock.lock();
+            try { return self.conn.get(self.prefix + id); } finally { self.lock.unlock(); }
+        }
+        fn write(id: string, payload: string, lifetimeSeconds: long) {
+            self.lock.lock();
+            try { self.conn.setEx(self.prefix + id, lifetimeSeconds, payload); } finally { self.lock.unlock(); }
+        }
+        fn destroy(id: string) {
+            self.lock.lock();
+            try { self.conn.del(self.prefix + id); } finally { self.lock.unlock(); }
+        }
+    }
+}
