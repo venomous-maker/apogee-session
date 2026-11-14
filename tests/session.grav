@@ -10,9 +10,7 @@ use apogee.*
 
 test "values, nesting, counters, pull, remember, flush" {
     let s = new Session(new MemorySessionStore()).start()
-    let roles = new Array<any>(); roles.push("admin")
-    let user = new HashMap<string, any>(); user.put("name", "Ada"); user.put("roles", roles)
-    s.put("user", user)
+    s.put("user", {"name": "Ada", "roles": ["admin"]})
     assertEq(s.get("user.name") as string, "Ada")
     assertEq("${s.increment("visits")} ${s.increment("visits", 4)} ${s.decrement("visits")}", "1 5 4")
     s.push("cart", "apple")
