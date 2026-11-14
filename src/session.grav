@@ -25,7 +25,7 @@ namespace apogee {
         fn gc(lifetimeSeconds: long) {}
     }
 
-    class Session implements FlashStore, OldInputStore {
+    class Session implements FlashStore, OldInputStore, TokenStore {
         public id: string
         public name: string
         private data: HashMap<string, any>
