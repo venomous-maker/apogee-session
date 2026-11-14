@@ -4,8 +4,8 @@
 import "std"
 import "std/net"
 import "../src/all.grav"
-import "../../apogee-routing/src/all.grav"
-import "../../apogee-validation/src/all.grav"
+import "apogee-routing"
+import "apogee-validation"
 use apogee.*
 
 test "values, nesting, counters, pull, remember, flush" {

@@ -3,6 +3,9 @@ lib = "src/all.grav"
 paths = ["src"]
 
 [dependencies]
-apogee-container = { path = "../apogee-container" }
-apogee-http = { path = "../apogee-http" }
-grav-redis = { path = "../grav-redis" }
+apogee-container = "github.com/venomous-maker/apogee-container"
+apogee-http = "github.com/venomous-maker/apogee-http"
+# (the tests run the middleware through the router, with form requests)
+apogee-routing = "github.com/venomous-maker/apogee-routing"
+apogee-validation = "github.com/venomous-maker/apogee-validation"
+grav-redis = "github.com/venomous-maker/grav-redis"
