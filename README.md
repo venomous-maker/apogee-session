@@ -45,7 +45,9 @@ HttpOnly, SameSite=Lax, Secure on HTTPS, for `lifetimeMinutes`, or until
 the browser closes with `expireOnClose`. An error that renders itself (a
 failed form) is rendered inside it, so the errors and old input it
 flashed are saved. Expired sessions are collected on about one request
-in `gcLottery`.
+in `gcLottery`, at most once in `gcEverySeconds` (60), on a thread of its
+own so no request waits. The file store stamps each file's modified time
+with its expiry, so a sweep stats files instead of reading them.
 
 `VerifyCsrfToken` requires the session's token on POST, PUT, PATCH and
 DELETE, as a `_token` field, an `X-CSRF-TOKEN` header, or the

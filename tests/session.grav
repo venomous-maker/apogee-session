@@ -73,8 +73,13 @@ test "file and Redis stores round-trip and expire" {
     s.save(60)
     assertEq(new Session(fs, s.id).start().get("x") as long, 42 as long)
     fs.write(Session.newId(), "{}", -1)                                 // already expired
+    assertEq(new File("${dir}/sess_${s.id}").modified() > Time.now(), true)   // stamped with its expiry
+    let old = new File("${dir}/sess_" + Session.newId())                // written before the stamp: read to be sure
+    old.write("${Time.now() + 60}\n{}")
+    old.setModified(Time.now() - 3600)
     fs.gc(60)
-    assertEq(Dir.list(dir).size(), 1)
+    assertEq(Dir.list(dir).size(), 2)
+    old.delete()
     fs.destroy(s.id)
     assertEq(fs.read(s.id) == null, true)
     Dir.removeAll(dir)

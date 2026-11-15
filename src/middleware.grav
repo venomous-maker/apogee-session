@@ -26,15 +26,20 @@ namespace apogee {
         // Secure cookies: true, false, or null for "when the request is HTTPS".
         public secure: bool? = null
         public sameSite: string = "Lax"
-        // Collect expired sessions on about one request in this many (0: never).
+        // Collect expired sessions on about one request in this many (0: never)…
         public gcLottery: int = 100
+        // …but at most once in this many seconds. The sweep runs on a thread of
+        // its own, so no request waits for it.
+        public gcEverySeconds: int = 60
         private jar: CookieJar
         private hits: AtomicInt
+        private nextCollect: AtomicInt          // (unix seconds: no sweep starts before)
 
         constructor(store: SessionStore, appKey: string) {
             self.store = store;
             self.jar = new CookieJar(appKey);
             self.hits = new AtomicInt(0);
+            self.nextCollect = new AtomicInt(0);
         }
         fn lifetimeSeconds() -> long { return (self.lifetimeMinutes as long) * 60; }
         // The session the request's cookie names (or a new one), started.
@@ -51,7 +56,13 @@ namespace apogee {
         }
         fn maybeCollect() {
             if (self.gcLottery <= 0) { return; }
-            if (self.hits.increment() % (self.gcLottery as long) == 0) { self.store.gc(self.lifetimeSeconds()); }
+            if (self.hits.increment() % (self.gcLottery as long) != 0) { return; }
+            let now = Time.now();
+            let next = self.nextCollect.get();
+            if (now < next || !self.nextCollect.compareAndSet(next, now + (self.gcEverySeconds as long))) { return; }   // (one thread wins)
+            let store = self.store;
+            let life = self.lifetimeSeconds();
+            Thread.spawn("session-gc", fn() { try { store.gc(life); } catch (e: Exception) {} }).detach();
         }
     }
 

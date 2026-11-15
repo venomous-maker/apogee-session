@@ -45,6 +45,8 @@ namespace apogee {
     }
 
     // One file per session under `dir` (written to a temp file, then renamed).
+    // Each file's modified time is set to when it expires, so a sweep needs
+    // the directory listing and a stat per file, not every file's contents.
     class FileSessionStore implements SessionStore {
         public dir: string
         private static counter: AtomicInt = new AtomicInt(0)
@@ -64,7 +66,13 @@ namespace apogee {
         fn write(id: string, payload: string, lifetimeSeconds: long) {
             let target = self.path(id);
             let tmp = new File(target + ".tmp${Process.pid()}_${FileSessionStore.counter.increment()}");
-            if (!tmp.write("${Time.now() + lifetimeSeconds}\n" + payload) || !tmp.moveTo(target)) {
+            let expires = Time.now() + lifetimeSeconds;
+            if (!tmp.write("${expires}\n" + payload)) {
+                tmp.delete();
+                throw new IOError("cannot write a session to '${self.dir}'");
+            }
+            tmp.setModified(expires);                                // (best effort: gc reads a file it cannot tell by)
+            if (!tmp.moveTo(target)) {
                 tmp.delete();
                 throw new IOError("cannot write a session to '${self.dir}'");
             }
@@ -74,9 +82,11 @@ namespace apogee {
             let now = Time.now();
             for (name in Dir.list(self.dir)) {
                 if (!Str.startsWith(name, "sess_") || Str.contains(name, ".tmp")) { continue; }
-                let raw = new File(self.dir + "/" + name).readOr("");
+                let f = new File(self.dir + "/" + name);
+                if (f.modified() > now) { continue; }                  // stamped with a later expiry: alive
+                let raw = f.readOr("");                                 // (else make sure: files from before the stamp)
                 let nl = Str.indexOf(raw, "\n");
-                if (nl < 0 || Integer.parseOr(raw[..nl], 0) <= now) { new File(self.dir + "/" + name).delete(); }
+                if (nl < 0 || Integer.parseOr(raw[..nl], 0) <= now) { f.delete(); }
             }
         }
     }
