@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.0 (2026-11-19)
+
 The first tagged release. Needs grav 1.7.0 or newer.
 
 Sessions for [Apogee](https://github.com/venomous-maker): what a browser keeps across requests through a signed cookie, with flash data that lives exactly one more request, old input and errors for forms, a CSRF token, and memory, file and Redis stores.
