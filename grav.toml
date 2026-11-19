@@ -4,9 +4,9 @@ grav = ">=1.7.0"
 paths = ["src"]
 
 [dependencies]
-apogee-container = "github.com/venomous-maker/apogee-container"
-apogee-http = "github.com/venomous-maker/apogee-http"
+apogee-container = "github.com/venomous-maker/apogee-container@v0.1.0"
+apogee-http = "github.com/venomous-maker/apogee-http@v0.1.0"
 # (the tests run the middleware through the router, with form requests)
-apogee-routing = "github.com/venomous-maker/apogee-routing"
-apogee-validation = "github.com/venomous-maker/apogee-validation"
-grav-redis = "github.com/venomous-maker/grav-redis"
+apogee-routing = "github.com/venomous-maker/apogee-routing@v0.1.0"
+apogee-validation = "github.com/venomous-maker/apogee-validation@v0.1.0"
+grav-redis = "github.com/venomous-maker/grav-redis@v0.1.0"
