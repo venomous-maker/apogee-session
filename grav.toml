@@ -1,12 +1,12 @@
 name = "apogee-session"
 lib = "src/all.grav"
-grav = ">=1.7.0"
+grav = ">=1.9.0"
 paths = ["src"]
 
 [dependencies]
-apogee-container = "github.com/venomous-maker/apogee-container@v0.1.0"
-apogee-http = "github.com/venomous-maker/apogee-http@v0.1.0"
+apogee-container = "github.com/venomous-maker/apogee-container@v0.2.0"
+apogee-http = "github.com/venomous-maker/apogee-http@v0.2.0"
 # (the tests run the middleware through the router, with form requests)
-apogee-routing = "github.com/venomous-maker/apogee-routing@v0.1.0"
-apogee-validation = "github.com/venomous-maker/apogee-validation@v0.1.0"
-grav-redis = "github.com/venomous-maker/grav-redis@v0.1.0"
+apogee-routing = "github.com/venomous-maker/apogee-routing@v0.2.0"
+apogee-validation = "github.com/venomous-maker/apogee-validation@v0.2.0"
+grav-redis = "github.com/venomous-maker/grav-redis@v0.2.0"
