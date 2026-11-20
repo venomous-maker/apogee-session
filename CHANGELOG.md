@@ -6,6 +6,10 @@ compiler versions it builds with.
 
 ## Unreleased
 
+### Requirements
+
+- Uses the 0.2.1 release of grav-redis.
+
 ## 0.2.0 (2026-11-20)
 
 ### Requirements
