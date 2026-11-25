@@ -6,6 +6,10 @@ compiler versions it builds with.
 
 ## Unreleased
 
+### Dependencies
+
+- Uses apogee-http 0.3.0, apogee-routing 0.3.0, apogee-validation 0.2.1 (from their GitHub tags).
+
 ## 0.2.1 (2026-11-20)
 
 ### Requirements
