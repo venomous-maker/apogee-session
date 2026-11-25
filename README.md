@@ -5,7 +5,7 @@ across requests through a signed cookie, with flash data that lives exactly
 one more request, old input and errors for forms, a CSRF token, and
 memory, file and Redis stores.
 
-```grav
+```typescript
 import "std"
 import "apogee-session"
 
