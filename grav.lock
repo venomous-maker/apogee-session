@@ -3,4 +3,4 @@ apogee-container = { source = "github.com/venomous-maker/apogee-container", vers
 apogee-http = { source = "github.com/venomous-maker/apogee-http", version = "v0.3.0", commit = "c094f1debc4ca1f71343f77ed80174e06ac47254" }
 apogee-routing = { source = "github.com/venomous-maker/apogee-routing", version = "v0.3.0", commit = "e88127e9b666c317d39d6b26ce01ae0f61bf602c" }
 apogee-validation = { source = "github.com/venomous-maker/apogee-validation", version = "v0.2.1", commit = "cc32e20f5bbffeb1c02774923c2217be1644e3a7" }
-grav-redis = { source = "github.com/venomous-maker/grav-redis", version = "v0.2.1", commit = "f3dff2ec9efc3f53d2cd3c394fc412e4776244c3" }
+grav-redis = { source = "github.com/venomous-maker/grav-redis", version = "v0.2.2", commit = "d106c93e198e605d898833211723b70e6b80a8fb" }
